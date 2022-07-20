@@ -20,10 +20,12 @@ import androidx.compose.animation.core.AnimationSpec
 import androidx.compose.animation.core.SpringSpec
 import androidx.compose.foundation.gestures.FlingBehavior
 import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.OverScrollController
 import androidx.compose.foundation.gestures.ScrollScope
 import androidx.compose.foundation.gestures.ScrollableDefaults
 import androidx.compose.foundation.gestures.ScrollableState
 import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.foundation.gestures.rememberOverScrollController
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.scrollable
 import androidx.compose.foundation.interaction.InteractionSource
@@ -40,6 +42,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.structuralEqualityPolicy
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Outline
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.layout.IntrinsicMeasurable
 import androidx.compose.ui.layout.IntrinsicMeasureScope
 import androidx.compose.ui.layout.LayoutModifier
@@ -54,9 +61,11 @@ import androidx.compose.ui.semantics.scrollBy
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.verticalScrollAxisRange
 import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.LayoutDirection
-import kotlin.math.roundToInt
+import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 /**
  * Create and [remember] the [ScrollState] based on the currently appropriate scroll
@@ -202,18 +211,22 @@ class ScrollState(initial: Int) : ScrollableState {
  * `null`, default from [ScrollableDefaults.flingBehavior] will be used.
  * @param reverseScrolling reverse the direction of scrolling, when `true`, 0 [ScrollState.value]
  * will mean bottom, when `false`, 0 [ScrollState.value] will mean top
+ * @param clipScrollableContainer clip the main axis sides in order to not display the content
+ * which is scrolled out.
  */
 fun Modifier.verticalScroll(
     state: ScrollState,
     enabled: Boolean = true,
     flingBehavior: FlingBehavior? = null,
-    reverseScrolling: Boolean = false
+    reverseScrolling: Boolean = false,
+    clipScrollableContainer: Boolean = true
 ) = scroll(
     state = state,
     isScrollable = enabled,
     reverseScrolling = reverseScrolling,
     flingBehavior = flingBehavior,
-    isVertical = true
+    isVertical = true,
+    clipScrollableContainer = clipScrollableContainer,
 )
 
 /**
@@ -231,43 +244,47 @@ fun Modifier.verticalScroll(
  * `null`, default from [ScrollableDefaults.flingBehavior] will be used.
  * @param reverseScrolling reverse the direction of scrolling, when `true`, 0 [ScrollState.value]
  * will mean right, when `false`, 0 [ScrollState.value] will mean left
+ * @param clipScrollableContainer clip the main axis sides in order to not display the content
+ * which is scrolled out.
  */
 fun Modifier.horizontalScroll(
     state: ScrollState,
     enabled: Boolean = true,
     flingBehavior: FlingBehavior? = null,
-    reverseScrolling: Boolean = false
+    reverseScrolling: Boolean = false,
+    clipScrollableContainer: Boolean = true
 ) = scroll(
     state = state,
     isScrollable = enabled,
     reverseScrolling = reverseScrolling,
     flingBehavior = flingBehavior,
-    isVertical = false
+    isVertical = false,
+    clipScrollableContainer = clipScrollableContainer
 )
 
-@OptIn(ExperimentalFoundationApi::class)
 private fun Modifier.scroll(
     state: ScrollState,
     reverseScrolling: Boolean,
     flingBehavior: FlingBehavior?,
     isScrollable: Boolean,
-    isVertical: Boolean
+    isVertical: Boolean,
+    clipScrollableContainer: Boolean
 ) = composed(
     factory = {
-        val overscrollEffect = ScrollableDefaults.overscrollEffect()
+        val overScrollController = rememberOverScrollController()
         val coroutineScope = rememberCoroutineScope()
         val semantics = Modifier.semantics {
-            val accessibilityScrollState = ScrollAxisRange(
-                value = { state.value.toFloat() },
-                maxValue = { state.maxValue.toFloat() },
-                reverseScrolling = reverseScrolling
-            )
-            if (isVertical) {
-                this.verticalScrollAxisRange = accessibilityScrollState
-            } else {
-                this.horizontalScrollAxisRange = accessibilityScrollState
-            }
             if (isScrollable) {
+                val accessibilityScrollState = ScrollAxisRange(
+                    value = { state.value.toFloat() },
+                    maxValue = { state.maxValue.toFloat() },
+                    reverseScrolling = reverseScrolling
+                )
+                if (isVertical) {
+                    this.verticalScrollAxisRange = accessibilityScrollState
+                } else {
+                    this.horizontalScrollAxisRange = accessibilityScrollState
+                }
                 // when b/156389287 is fixed, this should be proper scrollTo with reverse handling
                 scrollBy(
                     action = { x: Float, y: Float ->
@@ -283,9 +300,8 @@ private fun Modifier.scroll(
                 )
             }
         }
-        val orientation = if (isVertical) Orientation.Vertical else Orientation.Horizontal
         val scrolling = Modifier.scrollable(
-            orientation = orientation,
+            orientation = if (isVertical) Orientation.Vertical else Orientation.Horizontal,
             reverseDirection = run {
                 // A finger moves with the content, not with the viewport. Therefore,
                 // always reverse once to have "natural" gesture that goes reversed to layout
@@ -301,15 +317,12 @@ private fun Modifier.scroll(
             interactionSource = state.internalInteractionSource,
             flingBehavior = flingBehavior,
             state = state,
-            overscrollEffect = overscrollEffect
+            overScrollController = overScrollController
         )
         val layout =
-            ScrollingLayoutModifier(state, reverseScrolling, isVertical, overscrollEffect)
-        semantics
-            .clipScrollableContainer(orientation)
-            .overscroll(overscrollEffect)
-            .then(scrolling)
-            .then(layout)
+            ScrollingLayoutModifier(state, reverseScrolling, isVertical, overScrollController)
+        if (clipScrollableContainer) semantics.clipScrollableContainer(isVertical)
+        semantics.then(scrolling).then(layout)
     },
     inspectorInfo = debugInspectorInfo {
         name = "scroll"
@@ -318,26 +331,21 @@ private fun Modifier.scroll(
         properties["flingBehavior"] = flingBehavior
         properties["isScrollable"] = isScrollable
         properties["isVertical"] = isVertical
+        properties["clipScrollableContainer"] = clipScrollableContainer
     }
 )
 
-@OptIn(ExperimentalFoundationApi::class)
 private data class ScrollingLayoutModifier(
     val scrollerState: ScrollState,
     val isReversed: Boolean,
     val isVertical: Boolean,
-    val overscrollEffect: OverscrollEffect
+    val overScrollController: OverScrollController
 ) : LayoutModifier {
-    @OptIn(ExperimentalFoundationApi::class)
     override fun MeasureScope.measure(
         measurable: Measurable,
         constraints: Constraints
     ): MeasureResult {
-        checkScrollableContainerConstraints(
-            constraints,
-            if (isVertical) Orientation.Vertical else Orientation.Horizontal
-        )
-
+        constraints.assertNotNestingScrollableContainers(isVertical)
         val childConstraints = constraints.copy(
             maxHeight = if (isVertical) Constraints.Infinity else constraints.maxHeight,
             maxWidth = if (isVertical) constraints.maxWidth else Constraints.Infinity
@@ -348,13 +356,10 @@ private data class ScrollingLayoutModifier(
         val scrollHeight = placeable.height - height
         val scrollWidth = placeable.width - width
         val side = if (isVertical) scrollHeight else scrollWidth
-        overscrollEffect.isEnabled = side != 0
-        // The max value must be updated before returning from the measure block so that any other
-        // chained RemeasurementModifiers that try to perform scrolling based on the new
-        // measurements inside onRemeasured are able to scroll to the new max based on the newly-
-        // measured size.
-        scrollerState.maxValue = side
+        overScrollController
+            .refreshContainerInfo(Size(width.toFloat(), height.toFloat()), side != 0)
         return layout(width, height) {
+            scrollerState.maxValue = side
             val scroll = scrollerState.value.coerceIn(0, side)
             val absScroll = if (isReversed) scroll - side else -scroll
             val xOffset = if (isVertical) 0 else absScroll
@@ -383,3 +388,88 @@ private data class ScrollingLayoutModifier(
         width: Int
     ) = measurable.maxIntrinsicHeight(width)
 }
+
+internal fun Constraints.assertNotNestingScrollableContainers(isVertical: Boolean) {
+    if (isVertical) {
+        check(maxHeight != Constraints.Infinity) {
+            "Vertically scrollable component was measured with an infinity maximum height " +
+                    "constraints, which is disallowed. One of the common reasons is nesting layouts " +
+                    "like LazyColumn and Column(Modifier.verticalScroll()). If you want to add a " +
+                    "header before the list of items please add a header as a separate item() before " +
+                    "the main items() inside the LazyColumn scope. There are could be other reasons " +
+                    "for this to happen: your ComposeView was added into a LinearLayout with some " +
+                    "weight, you applied Modifier.wrapContentSize(unbounded = true) or wrote a " +
+                    "custom layout. Please try to remove the source of infinite constraints in the " +
+                    "hierarchy above the scrolling container."
+        }
+    } else {
+        check(maxWidth != Constraints.Infinity) {
+            "Horizontally scrollable component was measured with an infinity maximum width " +
+                    "constraints, which is disallowed. One of the common reasons is nesting layouts " +
+                    "like LazyRow and Row(Modifier.horizontalScroll()). If you want to add a " +
+                    "header before the list of items please add a header as a separate item() before " +
+                    "the main items() inside the LazyRow scope. There are could be other reasons " +
+                    "for this to happen: your ComposeView was added into a LinearLayout with some " +
+                    "weight, you applied Modifier.wrapContentSize(unbounded = true) or wrote a " +
+                    "custom layout. Please try to remove the source of infinite constraints in the " +
+                    "hierarchy above the scrolling container."
+        }
+    }
+}
+
+/**
+ * In the scrollable containers we want to clip the main axis sides in order to not display the
+ * content which is scrolled out. But once we apply clipToBounds() modifier on such containers it
+ * causes unexpected behavior as we also clip the content on the cross axis sides. It is
+ * unexpected as Compose components are not clipping by default. The most common case how it
+ * could be reproduced is a horizontally scrolling list of Cards. Cards have the elevation by
+ * default and such Cards will be drawn with clipped shadows on top and bottom. This was harder
+ * to reproduce in the Views system as usually scrolling containers like RecyclerView didn't have
+ * an opaque background which means the ripple was drawn on the surface on the first parent with
+ * background. In Compose as we don't clip by default we draw shadows right in place.
+ * We faced similar issue in Compose already with Androids Popups and Dialogs where we decided to
+ * just predefine some constant with a maximum elevation size we are not going to clip. We are
+ * going to reuse this technique here. This will improve how it works in most common cases. If the
+ * user will need to have a larger unclipped area for some reason they can always add the needed
+ * padding inside the scrollable area.
+ */
+internal fun Modifier.clipScrollableContainer(isVertical: Boolean) =
+    then(if (isVertical) VerticalScrollableClipModifier else HorizontalScrollableClipModifier)
+
+private val MaxSupportedElevation = 30.dp
+
+private val HorizontalScrollableClipModifier = Modifier.clip(object : Shape {
+    override fun createOutline(
+        size: Size,
+        layoutDirection: LayoutDirection,
+        density: Density
+    ): Outline {
+        val inflateSize = with(density) { MaxSupportedElevation.roundToPx().toFloat() }
+        return Outline.Rectangle(
+            Rect(
+                left = 0f,
+                top = -inflateSize,
+                right = size.width,
+                bottom = size.height + inflateSize
+            )
+        )
+    }
+})
+
+private val VerticalScrollableClipModifier = Modifier.clip(object : Shape {
+    override fun createOutline(
+        size: Size,
+        layoutDirection: LayoutDirection,
+        density: Density
+    ): Outline {
+        val inflateSize = with(density) { MaxSupportedElevation.roundToPx().toFloat() }
+        return Outline.Rectangle(
+            Rect(
+                left = -inflateSize,
+                top = 0f,
+                right = size.width + inflateSize,
+                bottom = size.height
+            )
+        )
+    }
+})
